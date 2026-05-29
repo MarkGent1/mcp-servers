@@ -1,0 +1,10 @@
+{
+  "server": {
+    "type": "command",
+    "command": "C:\\Program Files\\nodejs\\node.exe",
+    "args": ["server.js"]
+  },
+  "permissions": {
+    "run": true
+  }
+}
