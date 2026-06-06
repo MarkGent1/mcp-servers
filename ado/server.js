@@ -25,10 +25,13 @@ const server = new McpServer({
 // -----------------------------
 // Helper: ADO API wrapper
 // -----------------------------
-async function adoRequest(path, method = "GET", body = null) {
-  // GET uses stable API, everything else uses preview
-  const apiVersion = method === "GET" ? "7.0" : "7.0-preview";
-  const url = `https://dev.azure.com/${ADO_ORG}/${ADO_PROJECT}/_apis${path}?api-version=${apiVersion}`;
+async function adoRequest(path, method = "GET", body = null, apiVersion = null) {
+  if (!apiVersion) {
+    apiVersion = method === "GET" ? "7.0" : "7.0-preview";
+  }
+
+  const separator = path.includes("?") ? "&" : "?";
+  const url = `https://dev.azure.com/${ADO_ORG}/${ADO_PROJECT}/_apis${path}${separator}api-version=${apiVersion}`;
 
   const res = await fetch(url, {
     method,
@@ -147,22 +150,145 @@ server.registerTool(
     })
   },
   async ({ id, prUrl }) => {
+
+    //
+    // 1. Parse PR URL
+    //
+    const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) {
+      throw new Error(`Invalid PR URL: ${prUrl}`);
+    }
+    const [, owner, repo, prNumber] = match;
+
+    //
+    // 2. Fetch GitHub service connections
+    //
+    const connections = await adoRequest(
+      "/serviceendpoint/endpoints",
+      "GET",
+      null,
+      "7.1-preview.4"
+    );
+
+    const githubConnections = (connections.value || []).filter(
+      c => c.type?.toLowerCase() === "github"
+    );
+
+    if (githubConnections.length === 0) {
+      throw new Error("No GitHub service connections found in ADO.");
+    }
+
+    const connectionId = githubConnections[0].id;
+
+    //
+    // 3. Fetch GitHub repo ID (numeric)
+    //
+    const ghHeaders = {
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "ado-mcp"
+    };
+
+    if (process.env.GITHUB_TOKEN) {
+      ghHeaders["Authorization"] = `Bearer ${process.env.GITHUB_TOKEN}`;
+    }
+
+    const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers: ghHeaders
+    });
+
+    if (!ghRes.ok) {
+      throw new Error(`GitHub API error fetching repo: ${ghRes.status}`);
+    }
+
+    const ghRepo = await ghRes.json();
+    const repoId = ghRepo.id;
+
+    //
+    // 4. Build the correct ADO artifact URL
+    //
+    const adoArtifactUrl =
+      `vstfs:///GitHub/PullRequest/${connectionId}/${repoId}/${prNumber}`;
+
+    //
+    // 5. Build patch payload
+    //
     const ops = [
       {
         op: "add",
         path: "/relations/-",
         value: {
           rel: "ArtifactLink",
-          url: prUrl,
-          attributes: { name: "Pull Request" }
+          url: adoArtifactUrl,
+          attributes: {
+            name: "GitHub Pull Request",
+            resourceType: "GitHubPullRequest"
+          }
         }
       }
     ];
 
+    //
+    // 6. Patch the work item
+    //
     const data = await adoRequest(`/wit/workitems/${id}`, "PATCH", ops);
 
     return {
       content: [{ type: "text", text: `Linked PR to Work Item ${id}` }],
+      structuredContent: { workItem: data }
+    };
+  }
+);
+
+// -----------------------------
+// Tool: createChildTask
+// -----------------------------
+server.registerTool(
+  "createChildTask",
+  {
+    description: "Create a Task linked to a parent Work Item",
+    inputSchema: z.object({
+      parentId: z.number(),
+      title: z.string(),
+      description: z.string().optional()
+    }),
+    outputSchema: z.object({
+      workItem: z.any()
+    })
+  },
+  async ({ parentId, title, description }) => {
+    const ops = [
+      {
+        op: "add",
+        path: "/fields/System.Title",
+        value: title
+      },
+      {
+        op: "add",
+        path: "/fields/System.WorkItemType",
+        value: "Task"
+      },
+      {
+        op: "add",
+        path: "/relations/-",
+        value: {
+          rel: "System.LinkTypes.Hierarchy-Reverse",
+          url: `https://dev.azure.com/${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workItems/${parentId}`
+        }
+      }
+    ];
+
+    if (description) {
+      ops.push({
+        op: "add",
+        path: "/fields/System.Description",
+        value: description
+      });
+    }
+
+    const data = await adoRequest(`/wit/workitems/$task`, "PATCH", ops);
+
+    return {
+      content: [{ type: "text", text: `Created Task under Work Item ${parentId}` }],
       structuredContent: { workItem: data }
     };
   }
