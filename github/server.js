@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Octokit } from "octokit";
+import { execSync } from "node:child_process";
+import path from "node:path";
 
 const octokit = new Octokit({
   auth: process.env.GITHUB_TOKEN
@@ -15,9 +17,27 @@ const server = new McpServer({
   version: "1.0.0"
 });
 
+const defaultBranchName = "master"; // "master" or "main"
+
+function getOwnerRepoFromPath(repoPath) {
+  const cwd = path.resolve(repoPath);
+  const remoteUrl = execSync("git remote get-url origin", { cwd }).toString().trim();
+
+  // Handle SSH and HTTPS
+  // git@github.com:owner/repo.git
+  // https://github.com/owner/repo.git
+  let match = remoteUrl.match(/github\.com[:/](.+?)\/(.+?)(\.git)?$/);
+  if (!match) {
+    throw new Error(`Cannot parse GitHub remote from: ${remoteUrl}`);
+  }
+
+  return { owner: match[1], repo: match[2] };
+}
+
 // -----------------------------
 // Tool: get file contents
 // -----------------------------
+
 server.registerTool(
   "getFile",
   {
@@ -72,22 +92,22 @@ server.registerTool(
 server.registerTool(
   "createBranch",
   {
-    description: "Create a new branch in a GitHub repo",
+    description: "Create a new branch in the Git repo at repoPath",
     inputSchema: z.object({
-      owner: z.string(),
-      repo: z.string(),
-      branch: z.string(),
-      from: z.string().default("master")
+      repoPath: z.string(),
+      branchName: z.string()
     }),
     outputSchema: z.object({
       ref: z.string()
     })
   },
-  async ({ owner, repo, branch, from }) => {
+  async ({ repoPath, branchName }) => {
+    const { owner, repo } = getOwnerRepoFromPath(repoPath);
+
     const base = await octokit.rest.repos.getBranch({
       owner,
       repo,
-      branch: from
+      branch: defaultBranchName
     });
 
     const sha = base.data.commit.sha;
@@ -95,7 +115,7 @@ server.registerTool(
     const res = await octokit.rest.git.createRef({
       owner,
       repo,
-      ref: `refs/heads/${branch}`,
+      ref: `refs/heads/${branchName}`,
       sha
     });
 
@@ -198,17 +218,16 @@ server.registerTool(
 );
 
 // -----------------------------
-// Tool: commit & push
+// Tool: commit files
 // -----------------------------
 
 server.registerTool(
-  "commitAndPush",
+  "commitFiles",
   {
-    description: "Commit updated, new, deleted, or renamed files to a branch",
+    description: "Commit files to a branch in the Git repo at repoPath",
     inputSchema: z.object({
-      owner: z.string(),
-      repo: z.string(),
-      branch: z.string(),
+      repoPath: z.string(),
+      branchName: z.string(),
       message: z.string(),
       files: z.array(
         z.object({
@@ -223,11 +242,13 @@ server.registerTool(
       commit: z.string()
     })
   },
-  async ({ owner, repo, branch, message, files }) => {
+  async ({ repoPath, branchName, message, files }) => {
+    const { owner, repo } = getOwnerRepoFromPath(repoPath);
+
     const base = await octokit.rest.repos.getBranch({
       owner,
       repo,
-      branch
+      branch: branchName
     });
 
     const latestSha = base.data.commit.sha;
@@ -235,7 +256,6 @@ server.registerTool(
     const treeItems = [];
 
     for (const f of files) {
-      // Deleted file
       if (f.delete || f.content === null) {
         treeItems.push({
           path: f.path,
@@ -246,7 +266,6 @@ server.registerTool(
         continue;
       }
 
-      // New or modified file → create blob
       const blob = await octokit.rest.git.createBlob({
         owner,
         repo,
@@ -280,7 +299,7 @@ server.registerTool(
     await octokit.rest.git.updateRef({
       owner,
       repo,
-      ref: `heads/${branch}`,
+      ref: `heads/${branchName}`,
       sha: commit.data.sha
     });
 
@@ -292,37 +311,63 @@ server.registerTool(
 );
 
 // -----------------------------
-// Tool: create pull request
+// Tool: push commits
 // -----------------------------
+
 server.registerTool(
-  "createPullRequest",
+  "pushBranch",
   {
-    description: "Create a GitHub pull request",
+    description: "No-op push for API compatibility (GitHub API already updates remote)",
     inputSchema: z.object({
-      owner: z.string(),
-      repo: z.string(),
-      title: z.string(),
-      head: z.string(),
-      base: z.string(),
-      body: z.string().optional()
+      repoPath: z.string(),
+      branchName: z.string()
     }),
     outputSchema: z.object({
-      url: z.string()
+      ok: z.boolean()
     })
   },
-  async ({ owner, repo, title, head, base, body }) => {
+  async ({ repoPath, branchName }) => {
+    // Nothing to do; commits already update the remote ref
+    return {
+      content: [{ type: "text", text: `Branch ${branchName} is up to date on remote` }],
+      structuredContent: { ok: true }
+    };
+  }
+);
+
+// -----------------------------
+// Tool: create pull request
+// -----------------------------
+
+server.registerTool(
+  "openPullRequest",
+  {
+    description: "Create a GitHub pull request for the branch at repoPath",
+    inputSchema: z.object({
+      repoPath: z.string(),
+      branchName: z.string(),
+      title: z.string(),
+      body: z.string()
+    }),
+    outputSchema: z.object({
+      prUrl: z.string()
+    })
+  },
+  async ({ repoPath, branchName, title, body }) => {
+    const { owner, repo } = getOwnerRepoFromPath(repoPath);
+
     const res = await octokit.rest.pulls.create({
       owner,
       repo,
       title,
-      head,
-      base,
+      head: branchName,
+      base: defaultBranchName,
       body
     });
 
     return {
       content: [{ type: "text", text: res.data.html_url }],
-      structuredContent: { url: res.data.html_url }
+      structuredContent: { prUrl: res.data.html_url }
     };
   }
 );
