@@ -1,4 +1,16 @@
-# Overview
+
+# Table of Contents
+
+1. [Overview](README.md)
+2. [Local FS MCP server](docs/pages/1-localfs-mcp-server.md)
+3. [Terminal MCP server](docs/pages/2-terminal-mcp-server.md)
+4. [GitHub MCP server](docs/pages/3-github-mcp-server.md)
+5. [ADO MCP server](docs/pages/4-ado-mcp-server.md)
+6. [Azure MCP server](docs/pages/5-azure-mcp-server.md)
+7. [Install the core apps](docs/pages/6-install-core-apps.md)
+8. [Connect GitHub to Azure DevOps](docs/pages/7-connect-github-to-ado.md)
+
+# 1. Overview
 
 This is the foundation for the “AI‑driven SDLC” workflow.
 
@@ -87,3 +99,5 @@ Once these are connected:
     AI deploys to Azure
     AI tears down environments
     You only review PRs
+
+[Local FS MCP server >>](docs/pages/1-localfs-mcp-server.md)
